@@ -405,210 +405,30 @@
     return allProfiles.filter(p => ids.includes(p.id));
   }
 
-  // ── AI IMPORT ─────────────────────────────────────────────────────────────────
+  // ── JSON IMPORT (Claude pre-processed) ───────────────────────────────────────
   $('import-file').addEventListener('change', async e => {
-    const files = [...e.target.files];
-    if (!files.length) return;
-
-    $('import-status').textContent = `Reading ${files.length} file${files.length>1?'s':''}…`;
+    const file = e.target.files[0];
+    if (!file) return;
+    $('import-status').textContent = 'Reading JSON file…';
     $('import-preview').innerHTML = '';
     importRows = [];
-
-    const XLSX = await import('https://cdn.sheetjs.com/xlsx-0.20.2/package/xlsx.mjs');
-
-    // ── Read all files, collect all rows ────────────────────────────────────────
-    let allRows = [];
-    for (const file of files) {
-      const buf = await file.arrayBuffer();
-      const wb  = XLSX.read(buf);
-      // Use filename (without extension) as the event label fallback
-      const eventLabel = file.name.replace(/\.[^/.]+$/, '');
-      wb.SheetNames.forEach(sheetName => {
-        const ws   = wb.Sheets[sheetName];
-        const json = XLSX.utils.sheet_to_json(ws, { defval: '' });
-        const sheetGender = sheetName.toLowerCase().includes('girl') ? 'Bride'
-                          : sheetName.toLowerCase().includes('boy')  ? 'Groom'
-                          : '';
-        json.forEach(row => allRows.push({
-          ...row,
-          _sheetGender: sheetGender,
-          _sheet:       sheetName,
-          _file:        eventLabel   // track which file each row came from
-        }));
-      });
-    }
-
-    // ── Deduplicate across ALL files by email ────────────────────────────────────
-    // Keep the FIRST occurrence (earliest file) — later files may be repeat registrants
-    const seen = new Set();
-    const dupeCount = { count: 0 };
-    allRows = allRows.filter(r => {
-      const key = (r['Email'] || r['email'] || '').toLowerCase().trim();
-      if (!key || seen.has(key)) { if (key) dupeCount.count++; return false; }
-      seen.add(key);
-      return true;
-    });
-
-    const fileList = files.map(f => f.name).join(', ');
-    $('import-status').textContent =
-      `Found ${allRows.length} unique registrants across ${files.length} file${files.length>1?'s':''}`
-      + (dupeCount.count ? ` (${dupeCount.count} duplicate${dupeCount.count>1?'s':''} removed)` : '')
-      + `. Files: ${fileList}. Starting AI extraction…`;
-
-    $('import-progress-wrap').classList.remove('hidden');
-    $('import-progress').max   = allRows.length;
-    $('import-progress').value = 0;
-
-    // ── Process each row with Claude API ─────────────────────────────────────────
-    for (let i = 0; i < allRows.length; i++) {
-      const raw   = allRows[i];
-      const notes = raw['Provide any other details you wish to share with prospective Bride/Groom']
-                 || raw['details'] || '';
-      const extracted = await extractWithClaude(raw, notes);
-      importRows.push(extracted);
-      $('import-progress').value = i + 1;
-      $('import-status').textContent =
-        `Processing ${i+1} of ${allRows.length} — ${extracted.candidateFirstName||'…'} (${raw._file})`;
-    }
-
-    $('import-status').textContent =
-      `✅ Done. ${importRows.length} profiles ready from ${files.length} file${files.length>1?'s':''}. Review below before importing.`;
-    renderImportPreview();
-  });
-
-  async function extractWithClaude(raw, notes) {
-    const registrantName = `${raw['Name - First']||''} ${raw['Name - Last']||''}`.trim();
-    const email    = raw['Email'] || raw['email'] || '';
-    const phone    = raw['Contact Number'] || raw['contact'] || '';
-    const ageGroup = raw['Age Group'] || raw['age'] || '';
-    const sheetGender = raw._sheetGender || '';
-
-    // Determine gender from checkbox columns
-    const brideChecked = String(raw['Bride (Girl)   -- Gender']||raw['Bride']||'').toLowerCase().includes('check');
-    const groomChecked = String(raw['Bridegroom (Boy)   -- Gender']||raw['Groom']||'').toLowerCase().includes('check');
-    let gender = sheetGender;
-    if (brideChecked) gender = 'Bride';
-    if (groomChecked) gender = 'Groom';
-
-    const prompt = `You are extracting structured matrimonial profile data from a raw registration entry.
-
-RAW DATA:
-Registrant name: ${registrantName}
-Email: ${email}
-Phone: ${phone}
-Age group: ${ageGroup}
-Gender hint: ${gender}
-Free text notes: ${notes}
-
-Extract ALL available information and return ONLY a JSON object with these exact keys (use empty string "" if not found):
-{
-  "candidateFirstName": "",
-  "candidateLastName": "",
-  "registeredBy": "Self | Parent | Sibling | Other",
-  "registrantName": "(name of person who filled the form, if different from candidate)",
-  "needsReview": true or false,
-  "needsReviewReason": "(why it needs review, if applicable)",
-  "gender": "Bride | Groom",
-  "dob": "(YYYY-MM-DD if found)",
-  "timeOfBirth": "",
-  "placeOfBirth": "",
-  "community": "",
-  "subSect": "",
-  "gotra": "",
-  "nakshatra": "",
-  "rashi": "",
-  "gana": "",
-  "nadi": "",
-  "mutt": "",
-  "motherTongue": "",
-  "religion": "",
-  "languages": "(comma separated)",
-  "nativePlace": "",
-  "height": "",
-  "dietary": "Vegetarian | Vegan | Non-Vegetarian | (empty)",
-  "smokes": "No | Yes | Occasionally | (empty)",
-  "drinks": "No | Yes | Occasionally | (empty)",
-  "maritalStatus": "Never Married | Divorced | Widowed | (empty)",
-  "horoscopeRequired": true or false,
-  "country": "",
-  "city": "",
-  "visaStatus": "UK Citizen | ILR | Work Permit | Student Visa | India-based | Other | (empty)",
-  "willingToRelocate": "Yes | UK Only | No | (empty)",
-  "education": "PhD | Masters | Bachelors | Diploma | Other | (empty)",
-  "educationField": "",
-  "profession": "",
-  "employerType": "NHS | Public Sector | Private Sector | Self-Employed | Student | Other | (empty)",
-  "fatherName": "",
-  "fatherOccupation": "",
-  "motherName": "",
-  "motherOccupation": "",
-  "numBrothers": "",
-  "numSisters": "",
-  "familyType": "Nuclear | Joint | (empty)",
-  "aboutMe": "(candidate's own words or family description of candidate)",
-  "hobbies": "",
-  "preferredAgeMin": "",
-  "preferredAgeMax": "",
-  "preferredCommunity": "",
-  "preferredLocation": "",
-  "preferredSmokes": "",
-  "preferredDrinks": "",
-  "attendedEvent": true or false,
-  "coordinatorNotes": ""
-}
-
-Rules:
-- needsReview = true if: registered by parent/sibling, candidate name unclear, key details missing, or candidate is based in India
-- If the registrant is clearly the candidate themselves, registeredBy = "Self" and candidateFirstName = registrant first name
-- If a parent/sibling registered on behalf, extract candidate details from the notes where possible
-- Extract horoscope details carefully: gotra, nakshatra, rashi, gana, nadi are separate fields
-- Return ONLY the JSON object, no other text`;
-
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 1000,
-          messages: [{ role: 'user', content: prompt }]
-        })
-      });
-      const data = await res.json();
-      const text = data.content?.[0]?.text || '{}';
-      const clean = text.replace(/```json|```/g, '').trim();
-      const extracted = JSON.parse(clean);
-      return {
-        // base fields from spreadsheet
-        email: email.toLowerCase(),
-        whatsapp: phone,
-        ageGroup,
-        gender: extracted.gender || gender,
-        registeredEvent: raw._sheet || 'Matrimonial Meet May 2026',
-        status: 'active',
-        // AI extracted fields
-        ...extracted,
-        // always flag if candidate not in UK
-        needsReview: extracted.needsReview || false,
-      };
+      const text = await file.text();
+      const data = JSON.parse(text);
+      // Accept either a plain array or { profiles: [...] }
+      importRows = Array.isArray(data) ? data : (data.profiles || []);
+      if (!importRows.length) {
+        $('import-status').textContent = '⚠ No profiles found in file.';
+        return;
+      }
+      const reviewCount = importRows.filter(r => r.needsReview).length;
+      $('import-status').textContent =
+        `✅ Loaded ${importRows.length} profiles (${reviewCount} flagged for review). Check below then import.`;
+      renderImportPreview();
     } catch(err) {
-      // Fallback if AI fails — return basic data with review flag
-      return {
-        candidateFirstName: registrantName.split(' ')[0] || '',
-        candidateLastName:  registrantName.split(' ').slice(1).join(' ') || '',
-        registeredBy: 'Self',
-        gender,
-        email: email.toLowerCase(),
-        whatsapp: phone,
-        ageGroup,
-        registeredEvent: raw._sheet || 'Matrimonial Meet May 2026',
-        status: 'active',
-        needsReview: true,
-        needsReviewReason: 'AI extraction failed — please review manually',
-        coordinatorNotes: notes,
-      };
+      $('import-status').textContent = '❌ Invalid JSON file: ' + err.message;
     }
-  }
+  });
 
   function renderImportPreview() {
     const container = $('import-preview');
@@ -931,10 +751,15 @@ Rules:
     <!-- IMPORT TAB -->
     <div id="tab-import" class="tab-pane hidden">
       <div class="import-zone">
-        <h3>AI-Powered Spreadsheet Import</h3>
-        <p>Upload one or more matrimonial meet Excel files together (hold Ctrl/Cmd to select multiple). Claude will automatically extract all structured fields from each row — gotra, nakshatra, profession, languages and more — from the free-text notes. Duplicates across files are removed automatically. Profiles registered by a parent or sibling are flagged for your review.</p>
-        <label class="file-label" for="import-file">📂 Choose Excel Files (.xlsx)</label>
-        <input type="file" id="import-file" accept=".xlsx,.xls" multiple />
+        
+        <h3>Import Profiles from JSON</h3>
+        <p>
+          <strong>Step 1:</strong> Upload your Excel spreadsheet files to Claude.ai and ask Claude to extract and structure all profiles into a JSON file.<br><br>
+          <strong>Step 2:</strong> Download the JSON file Claude produces and upload it here — profiles load instantly into the preview below, ready to import into Firestore.<br><br>
+          Profiles registered by a parent or sibling are flagged ⚠ for your review before importing.
+        </p>
+        <label class="file-label" for="import-file">📂 Choose JSON File</label>
+        <input type="file" id="import-file" accept=".json" />
         <div id="import-status"></div>
         <div id="import-progress-wrap" class="hidden">
           <progress id="import-progress" value="0" max="100"></progress>
