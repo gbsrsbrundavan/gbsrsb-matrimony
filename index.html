@@ -95,10 +95,15 @@
 
   function updateStats() {
     const active  = allProfiles.filter(p => p.status !== 'withdrawn');
+    const reviewCount = active.filter(p => p.needsReview).length;
     $('stat-total').textContent   = active.length;
     $('stat-brides').textContent  = active.filter(p => p.gender === 'Bride').length;
     $('stat-grooms').textContent  = active.filter(p => p.gender === 'Groom').length;
     $('stat-matched').textContent = active.filter(p => p.status === 'matched').length;
+    $('stat-review').textContent  = reviewCount;
+    // Update checkbox label with live count
+    const lbl = $('review-filter-label');
+    if (lbl) lbl.textContent = `⚠ Needs review (${reviewCount})`;
   }
 
   // ── TABLE ─────────────────────────────────────────────────────────────────────
@@ -114,7 +119,7 @@
         <td class="name-cell">
           ${esc(p.candidateFirstName||p.firstName)} ${esc(p.candidateLastName||p.lastName)}
           ${p.registeredBy && p.registeredBy!=='Self' ? `<span class="proxy-tag">via ${esc(p.registeredBy)}</span>` : ''}
-          ${p.needsReview ? '<span class="review-tag">⚠ Review</span>' : ''}
+          ${p.needsReview ? `<span class="review-tag" title="${esc(p.needsReviewReason||'Needs review')}">⚠ ${esc(p.needsReviewReason||'Needs review')}</span>` : ''}
         </td>
         <td>${esc(p.ageGroup||'—')}</td>
         <td>${esc(p.community||'—')}</td>
@@ -150,6 +155,7 @@
     renderTable(filtered);
   }
 
+  window.applyFilters = applyFilters;
   ['search-input','filter-gender','filter-age','filter-status'].forEach(id =>
     $(id).addEventListener('input', applyFilters));
   $('filter-review').addEventListener('change', applyFilters);
@@ -535,11 +541,13 @@
   main { flex:1; padding:24px; max-width:1400px; width:100%; margin:0 auto; }
 
   /* STATS */
-  .stats-row { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px; }
+  .stats-row { display:grid; grid-template-columns:repeat(5,1fr); gap:16px; margin-bottom:24px; }
   .stat-card { background:#fff; border-radius:var(--radius); padding:20px 24px; box-shadow:var(--shadow); border-left:4px solid var(--gold); }
   .stat-card.bride { border-left-color:var(--bride-fg); }
   .stat-card.groom { border-left-color:var(--groom-fg); }
   .stat-card.matched { border-left-color:#2e7d32; }
+  .stat-card.review  { border-left-color:#e65100; cursor:pointer; }
+  .stat-card.review:hover { background:var(--cream); }
   .stat-label { font-size:.75rem; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; }
   .stat-value { font-size:2rem; font-weight:700; line-height:1.2; }
 
@@ -568,7 +576,7 @@
   tbody tr:hover { background:var(--cream); }
   .withdrawn-row { opacity:.45; }
   td { padding:10px 14px; font-size:.875rem; vertical-align:middle; }
-  .name-cell { font-weight:600; }
+  .name-cell { font-weight:600; max-width:300px; }
   .empty-row { text-align:center; padding:40px; color:var(--muted); }
   .actions-cell { white-space:nowrap; }
 
@@ -583,7 +591,7 @@
   .status-withdrawn{ background:#fce4ec; color:#880e4f; }
   .status-pending  { background:#fff8e1; color:#e65100; }
   .proxy-tag { font-size:.7rem; color:var(--muted); font-weight:400; margin-left:4px; }
-  .review-tag { font-size:.7rem; background:#fff3e0; color:#e65100; padding:2px 6px; border-radius:10px; font-weight:600; margin-left:4px; }
+  .review-tag { font-size:.72rem; background:#fff3e0; color:#e65100; padding:3px 8px; border-radius:6px; font-weight:600; display:inline-block; margin-top:3px; max-width:280px; white-space:normal; line-height:1.3; }
   .ok-tag { font-size:.7rem; background:#e8f5e9; color:#2e7d32; padding:2px 6px; border-radius:10px; font-weight:600; }
 
   /* ICON BUTTONS */
@@ -658,6 +666,7 @@
 
   @media (max-width:768px) {
     .stats-row { grid-template-columns:1fr 1fr; }
+    .stat-card.review { grid-column: 1 / -1; }
     .view-grid { grid-template-columns:1fr; }
     .form-grid, .form-grid.thirds { grid-template-columns:1fr; }
     main { padding:16px; }
@@ -707,6 +716,7 @@
         <div class="stat-card bride"><div class="stat-label">Brides</div><div class="stat-value" id="stat-brides">—</div></div>
         <div class="stat-card groom"><div class="stat-label">Grooms</div><div class="stat-value" id="stat-grooms">—</div></div>
         <div class="stat-card matched"><div class="stat-label">Matched</div><div class="stat-value" id="stat-matched">—</div></div>
+        <div class="stat-card review" onclick="document.getElementById('filter-review').checked=true;applyFilters()" title="Click to filter by needs review"><div class="stat-label">⚠ Needs Review</div><div class="stat-value" id="stat-review">—</div></div>
       </div>
 
       <div class="toolbar">
@@ -725,7 +735,7 @@
           <option value="withdrawn">Withdrawn</option>
           <option value="pending">Pending</option>
         </select>
-        <label class="review-filter"><input type="checkbox" id="filter-review" /> ⚠ Needs review only</label>
+        <label class="review-filter"><input type="checkbox" id="filter-review" /> <span id="review-filter-label">⚠ Needs review</span></label>
         <button class="btn btn-ghost" id="clear-filters">Clear</button>
         <button class="btn btn-outline" id="refresh-btn">↻ Refresh</button>
         <button class="btn btn-outline" id="export-btn">⬇ Export CSV</button>
