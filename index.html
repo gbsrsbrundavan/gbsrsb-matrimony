@@ -1,0 +1,1275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GB SRSB Vivaha Seva — Admin</title>
+
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+  import {
+    getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc,
+    query, orderBy, serverTimestamp, getDoc, setDoc
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  // ─── FIREBASE CONFIG ─────────────────────────────────────────────────────────
+  // Replace with values from Firebase Console → Project Settings → Your apps
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyBD2mCBO-mJxmRHzyNWisHM33vcjJLLOqM",
+  authDomain: "gbsrs-matrimony.firebaseapp.com",
+  projectId: "gbsrs-matrimony",
+  storageBucket: "gbsrs-matrimony.firebasestorage.app",
+  messagingSenderId: "621267127755",
+  appId: "1:621267127755:web:077f4f839d45f87c903a4e"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+
+  const app  = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db   = getFirestore(app);
+
+  // ─── STATE ────────────────────────────────────────────────────────────────────
+  let allProfiles = [];
+  let editingId   = null;
+
+  // ─── DOM HELPERS ──────────────────────────────────────────────────────────────
+  const $  = id => document.getElementById(id);
+  const show = id => $(id).classList.remove('hidden');
+  const hide = id => $(id).classList.add('hidden');
+
+  // ─── AUTH ─────────────────────────────────────────────────────────────────────
+  onAuthStateChanged(auth, async user => {
+    if (user) {
+      // Verify admin role in Firestore
+      const adminDoc = await getDoc(doc(db, 'admins', user.uid));
+      if (adminDoc.exists()) {
+        $('user-email').textContent = user.email;
+        hide('login-screen');
+        show('app-screen');
+        await loadProfiles();
+      } else {
+        await signOut(auth);
+        showError('login-error', 'Access denied. This account is not an admin.');
+      }
+    } else {
+      show('login-screen');
+      hide('app-screen');
+    }
+  });
+
+  $('login-btn').addEventListener('click', async () => {
+    const email = $('login-email').value.trim();
+    const pass  = $('login-pass').value;
+    if (!email || !pass) return showError('login-error', 'Enter email and password.');
+    try {
+      $('login-btn').textContent = 'Signing in…';
+      await signInWithEmailAndPassword(auth, email, pass);
+    } catch (e) {
+      showError('login-error', 'Incorrect email or password.');
+      $('login-btn').textContent = 'Sign In';
+    }
+  });
+
+  $('logout-btn').addEventListener('click', () => signOut(auth));
+
+  // ─── LOAD PROFILES ────────────────────────────────────────────────────────────
+  async function loadProfiles() {
+    showLoading(true);
+    try {
+      const snap = await getDocs(query(collection(db, 'profiles'), orderBy('createdAt', 'desc')));
+      allProfiles = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      updateStats();
+      renderTable(allProfiles);
+    } catch (e) {
+      console.error(e);
+    }
+    showLoading(false);
+  }
+
+  function updateStats() {
+    const active  = allProfiles.filter(p => p.status !== 'withdrawn');
+    const boys    = active.filter(p => p.gender === 'Groom');
+    const girls   = active.filter(p => p.gender === 'Bride');
+    const matched = active.filter(p => p.status === 'matched');
+    $('stat-total').textContent   = active.length;
+    $('stat-brides').textContent  = girls.length;
+    $('stat-grooms').textContent  = boys.length;
+    $('stat-matched').textContent = matched.length;
+  }
+
+  // ─── RENDER TABLE ─────────────────────────────────────────────────────────────
+  function renderTable(profiles) {
+    const tbody = $('profile-tbody');
+    if (profiles.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="9" class="empty-row">No profiles found.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = profiles.map(p => `
+      <tr class="profile-row ${p.status === 'withdrawn' ? 'withdrawn-row' : ''}">
+        <td><span class="badge badge-${p.gender === 'Bride' ? 'bride' : 'groom'}">${p.gender}</span></td>
+        <td class="name-cell">${esc(p.firstName)} ${esc(p.lastName)}</td>
+        <td>${esc(p.ageGroup || '—')}</td>
+        <td>${esc(p.community || '—')}</td>
+        <td>${esc(p.gotra || '—')}</td>
+        <td>${esc(p.location || '—')}</td>
+        <td>${esc(p.profession || '—')}</td>
+        <td><span class="status-pill status-${(p.status||'active').replace(' ','-')}">${p.status || 'active'}</span></td>
+        <td class="actions-cell">
+          <button class="btn-icon" onclick="window.viewProfile('${p.id}')" title="View">👁</button>
+          <button class="btn-icon" onclick="window.editProfile('${p.id}')" title="Edit">✏️</button>
+          <button class="btn-icon btn-danger" onclick="window.withdrawProfile('${p.id}')" title="Withdraw">🗑</button>
+        </td>
+      </tr>
+    `).join('');
+  }
+
+  // ─── SEARCH & FILTER ─────────────────────────────────────────────────────────
+  function applyFilters() {
+    const q         = $('search-input').value.toLowerCase();
+    const gender    = $('filter-gender').value;
+    const ageGroup  = $('filter-age').value;
+    const community = $('filter-community').value;
+    const status    = $('filter-status').value;
+
+    const filtered = allProfiles.filter(p => {
+      const text = `${p.firstName} ${p.lastName} ${p.community} ${p.gotra} ${p.location} ${p.profession} ${p.notes}`.toLowerCase();
+      return (
+        (!q         || text.includes(q)) &&
+        (!gender    || p.gender === gender) &&
+        (!ageGroup  || p.ageGroup === ageGroup) &&
+        (!community || (p.community||'').toLowerCase().includes(community.toLowerCase())) &&
+        (!status    || (p.status||'active') === status)
+      );
+    });
+    renderTable(filtered);
+  }
+
+  ['search-input','filter-gender','filter-age','filter-community','filter-status'].forEach(id => {
+    $(id).addEventListener('input', applyFilters);
+  });
+
+  $('clear-filters').addEventListener('click', () => {
+    ['search-input','filter-community'].forEach(id => $(id).value = '');
+    ['filter-gender','filter-age','filter-status'].forEach(id => $(id).selectedIndex = 0);
+    renderTable(allProfiles);
+  });
+
+  $('refresh-btn').addEventListener('click', loadProfiles);
+
+  // ─── ADD / EDIT PROFILE ───────────────────────────────────────────────────────
+  $('add-profile-btn').addEventListener('click', () => openForm(null));
+
+  window.editProfile = async id => {
+    const p = allProfiles.find(x => x.id === id);
+    if (p) openForm(p);
+  };
+
+  function openForm(profile) {
+    editingId = profile ? profile.id : null;
+    $('form-title').textContent = profile ? 'Edit Profile' : 'Add New Profile';
+    $('form-error').textContent = '';
+
+    const fields = ['gender','title','firstName','lastName','email','whatsapp',
+      'dob','ageGroup','community','subSect','gotra','nakshatra','rashi','mutt',
+      'height','dietary','maritalStatus','horoscopeRequired',
+      'country','city','visaStatus','willingToRelocate',
+      'education','profession','employerType',
+      'preferredAgeMin','preferredAgeMax','preferredCommunity','preferredLocation',
+      'registeredEvent','status','notes'];
+
+    fields.forEach(f => {
+      const el = $('f-' + f);
+      if (!el) return;
+      if (el.type === 'checkbox') el.checked = profile ? !!profile[f] : false;
+      else el.value = profile ? (profile[f] || '') : '';
+    });
+
+    show('form-modal');
+  }
+
+  $('form-cancel').addEventListener('click', () => hide('form-modal'));
+
+  $('profile-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    $('form-save').textContent = 'Saving…';
+    $('form-save').disabled = true;
+
+    const data = {
+      gender:             $('f-gender').value,
+      title:              $('f-title').value,
+      firstName:          $('f-firstName').value.trim(),
+      lastName:           $('f-lastName').value.trim(),
+      email:              $('f-email').value.trim().toLowerCase(),
+      whatsapp:           $('f-whatsapp').value.trim(),
+      dob:                $('f-dob').value,
+      ageGroup:           $('f-ageGroup').value,
+      community:          $('f-community').value.trim(),
+      subSect:            $('f-subSect').value.trim(),
+      gotra:              $('f-gotra').value.trim(),
+      nakshatra:          $('f-nakshatra').value.trim(),
+      rashi:              $('f-rashi').value.trim(),
+      mutt:               $('f-mutt').value.trim(),
+      height:             $('f-height').value.trim(),
+      dietary:            $('f-dietary').value,
+      maritalStatus:      $('f-maritalStatus').value,
+      horoscopeRequired:  $('f-horoscopeRequired').checked,
+      country:            $('f-country').value.trim(),
+      city:               $('f-city').value.trim(),
+      visaStatus:         $('f-visaStatus').value,
+      willingToRelocate:  $('f-willingToRelocate').value,
+      education:          $('f-education').value,
+      profession:         $('f-profession').value.trim(),
+      employerType:       $('f-employerType').value,
+      preferredAgeMin:    $('f-preferredAgeMin').value,
+      preferredAgeMax:    $('f-preferredAgeMax').value,
+      preferredCommunity: $('f-preferredCommunity').value.trim(),
+      preferredLocation:  $('f-preferredLocation').value.trim(),
+      registeredEvent:    $('f-registeredEvent').value.trim(),
+      status:             $('f-status').value,
+      notes:              $('f-notes').value.trim(),
+      updatedAt:          serverTimestamp(),
+    };
+
+    if (!data.firstName || !data.lastName || !data.gender) {
+      $('form-error').textContent = 'First name, last name and gender are required.';
+      $('form-save').textContent = 'Save Profile';
+      $('form-save').disabled = false;
+      return;
+    }
+
+    try {
+      if (editingId) {
+        await updateDoc(doc(db, 'profiles', editingId), data);
+      } else {
+        data.createdAt = serverTimestamp();
+        await addDoc(collection(db, 'profiles'), data);
+      }
+      hide('form-modal');
+      await loadProfiles();
+    } catch (err) {
+      $('form-error').textContent = 'Error saving: ' + err.message;
+    }
+    $('form-save').textContent = 'Save Profile';
+    $('form-save').disabled = false;
+  });
+
+  // ─── VIEW PROFILE ─────────────────────────────────────────────────────────────
+  window.viewProfile = id => {
+    const p = allProfiles.find(x => x.id === id);
+    if (!p) return;
+    $('view-content').innerHTML = buildProfileView(p);
+    show('view-modal');
+  };
+
+  $('view-close').addEventListener('click', () => hide('view-modal'));
+
+  function buildProfileView(p) {
+    const row = (label, val) => val ? `<tr><th>${label}</th><td>${esc(String(val))}</td></tr>` : '';
+    return `
+      <div class="view-header">
+        <span class="badge badge-${p.gender === 'Bride' ? 'bride' : 'groom'} badge-lg">${p.gender}</span>
+        <h2>${esc(p.title||'')} ${esc(p.firstName)} ${esc(p.lastName)}</h2>
+        <span class="status-pill status-${(p.status||'active').replace(' ','-')}">${p.status || 'active'}</span>
+      </div>
+      <div class="view-grid">
+        <div class="view-section">
+          <h3>Contact</h3>
+          <table class="detail-table">
+            ${row('Email', p.email)}
+            ${row('WhatsApp', p.whatsapp)}
+            ${row('Event', p.registeredEvent)}
+          </table>
+        </div>
+        <div class="view-section">
+          <h3>Personal</h3>
+          <table class="detail-table">
+            ${row('Date of Birth', p.dob)}
+            ${row('Age Group', p.ageGroup)}
+            ${row('Height', p.height)}
+            ${row('Dietary', p.dietary)}
+            ${row('Marital Status', p.maritalStatus)}
+            ${row('Horoscope Required', p.horoscopeRequired ? 'Yes' : 'No')}
+          </table>
+        </div>
+        <div class="view-section">
+          <h3>Community</h3>
+          <table class="detail-table">
+            ${row('Community', p.community)}
+            ${row('Sub-sect', p.subSect)}
+            ${row('Gotra', p.gotra)}
+            ${row('Nakshatra', p.nakshatra)}
+            ${row('Rashi', p.rashi)}
+            ${row('Mutt', p.mutt)}
+          </table>
+        </div>
+        <div class="view-section">
+          <h3>Location</h3>
+          <table class="detail-table">
+            ${row('Country', p.country)}
+            ${row('City', p.city)}
+            ${row('Visa Status', p.visaStatus)}
+            ${row('Willing to Relocate', p.willingToRelocate)}
+          </table>
+        </div>
+        <div class="view-section">
+          <h3>Education & Profession</h3>
+          <table class="detail-table">
+            ${row('Education', p.education)}
+            ${row('Profession', p.profession)}
+            ${row('Employer Type', p.employerType)}
+          </table>
+        </div>
+        <div class="view-section">
+          <h3>Preferences</h3>
+          <table class="detail-table">
+            ${row('Age Range', p.preferredAgeMin && p.preferredAgeMax ? `${p.preferredAgeMin}–${p.preferredAgeMax}` : '')}
+            ${row('Community Preference', p.preferredCommunity)}
+            ${row('Location Preference', p.preferredLocation)}
+          </table>
+        </div>
+      </div>
+      ${p.notes ? `<div class="view-notes"><h3>Additional Details</h3><p>${esc(p.notes)}</p></div>` : ''}
+    `;
+  }
+
+  // ─── WITHDRAW ─────────────────────────────────────────────────────────────────
+  window.withdrawProfile = async id => {
+    const p = allProfiles.find(x => x.id === id);
+    if (!p) return;
+    if (!confirm(`Mark ${p.firstName} ${p.lastName} as withdrawn? This can be undone by editing the profile.`)) return;
+    await updateDoc(doc(db, 'profiles', id), { status: 'withdrawn', updatedAt: serverTimestamp() });
+    await loadProfiles();
+  };
+
+  // ─── EXPORT ───────────────────────────────────────────────────────────────────
+  $('export-btn').addEventListener('click', () => {
+    const visible = getVisibleProfiles();
+    if (!visible.length) return alert('No profiles to export.');
+    const headers = ['Gender','Title','First Name','Last Name','Email','WhatsApp','DOB',
+      'Age Group','Community','Sub-Sect','Gotra','Nakshatra','Rashi','Mutt','Height',
+      'Dietary','Marital Status','Horoscope Required','Country','City','Visa Status',
+      'Relocate','Education','Profession','Employer','Pref Age Min','Pref Age Max',
+      'Pref Community','Pref Location','Event','Status','Notes'];
+    const rows = visible.map(p => [
+      p.gender,p.title,p.firstName,p.lastName,p.email,p.whatsapp,p.dob,
+      p.ageGroup,p.community,p.subSect,p.gotra,p.nakshatra,p.rashi,p.mutt,p.height,
+      p.dietary,p.maritalStatus,p.horoscopeRequired?'Yes':'No',
+      p.country,p.city,p.visaStatus,p.willingToRelocate,
+      p.education,p.profession,p.employerType,
+      p.preferredAgeMin,p.preferredAgeMax,p.preferredCommunity,p.preferredLocation,
+      p.registeredEvent,p.status,p.notes
+    ].map(v => `"${(v||'').toString().replace(/"/g,'""')}"`));
+
+    const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `gbsrs-matrimony-${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+  });
+
+  function getVisibleProfiles() {
+    const rows = $('profile-tbody').querySelectorAll('tr.profile-row');
+    const ids  = [...rows].map(r => r.querySelector('.btn-icon')?.getAttribute('onclick')?.match(/'([^']+)'/)?.[1]).filter(Boolean);
+    return allProfiles.filter(p => ids.includes(p.id));
+  }
+
+  // ─── UTILS ────────────────────────────────────────────────────────────────────
+  function esc(str) {
+    return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+  function showError(id, msg) { $(id).textContent = msg; }
+  function showLoading(on) { on ? show('loading') : hide('loading'); }
+</script>
+
+<style>
+  /* ── TOKENS ─────────────────────────────────────────────────────────────────── */
+  :root {
+    --maroon:     #58111A;
+    --maroon-d:   #3d0b12;
+    --saffron:    #C05621;
+    --gold:       #D4AF37;
+    --gold-pale:  #f5e9a8;
+    --cream:      #FBF4E6;
+    --cream-d:    #f0e6d0;
+    --charcoal:   #2A2118;
+    --mid:        #6b5744;
+    --muted:      #9e8a74;
+    --white:      #ffffff;
+    --bride-bg:   #fce4ec;
+    --bride-fg:   #880e4f;
+    --groom-bg:   #e3f2fd;
+    --groom-fg:   #0d47a1;
+    --radius:     8px;
+    --shadow:     0 2px 12px rgba(42,33,24,.10);
+    --shadow-md:  0 8px 32px rgba(42,33,24,.18);
+    font-size: 15px;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: var(--cream);
+    color: var(--charcoal);
+    min-height: 100vh;
+  }
+
+  .hidden { display: none !important; }
+
+  /* ── LOGIN ──────────────────────────────────────────────────────────────────── */
+  #login-screen {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(145deg, var(--maroon) 0%, var(--saffron) 100%);
+  }
+
+  .login-card {
+    background: var(--white);
+    border-radius: 16px;
+    padding: 48px 40px;
+    width: 100%;
+    max-width: 400px;
+    box-shadow: var(--shadow-md);
+    text-align: center;
+  }
+
+  .login-emblem {
+    width: 64px;
+    height: 64px;
+    background: var(--maroon);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 20px;
+    font-size: 28px;
+  }
+
+  .login-card h1 {
+    font-size: 1.4rem;
+    color: var(--maroon);
+    margin-bottom: 4px;
+    font-weight: 700;
+  }
+
+  .login-card p {
+    color: var(--muted);
+    font-size: .875rem;
+    margin-bottom: 28px;
+  }
+
+  .login-card input {
+    width: 100%;
+    padding: 12px 14px;
+    border: 1.5px solid var(--cream-d);
+    border-radius: var(--radius);
+    font-size: 1rem;
+    margin-bottom: 12px;
+    background: var(--cream);
+    color: var(--charcoal);
+    transition: border-color .15s;
+  }
+
+  .login-card input:focus { outline: none; border-color: var(--saffron); }
+
+  #login-btn {
+    width: 100%;
+    padding: 13px;
+    background: var(--maroon);
+    color: var(--white);
+    border: none;
+    border-radius: var(--radius);
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 4px;
+    transition: background .15s;
+  }
+
+  #login-btn:hover { background: var(--maroon-d); }
+
+  .error-text { color: var(--saffron); font-size: .85rem; margin-top: 10px; }
+
+  /* ── APP SHELL ──────────────────────────────────────────────────────────────── */
+  #app-screen { display: flex; flex-direction: column; min-height: 100vh; }
+
+  header {
+    background: var(--maroon);
+    color: var(--white);
+    padding: 0 24px;
+    height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-shadow: 0 2px 8px rgba(0,0,0,.25);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .header-left { display: flex; align-items: center; gap: 12px; }
+  .header-logo { font-size: 22px; }
+
+  header h1 {
+    font-size: 1rem;
+    font-weight: 700;
+    letter-spacing: .02em;
+  }
+
+  header h1 span {
+    color: var(--gold);
+    font-weight: 400;
+    font-size: .8rem;
+    display: block;
+    letter-spacing: .05em;
+  }
+
+  .header-right { display: flex; align-items: center; gap: 16px; }
+  #user-email { font-size: .8rem; color: rgba(255,255,255,.65); }
+
+  #logout-btn {
+    padding: 6px 14px;
+    background: rgba(255,255,255,.12);
+    border: 1px solid rgba(255,255,255,.2);
+    border-radius: 6px;
+    color: var(--white);
+    font-size: .8rem;
+    cursor: pointer;
+    transition: background .15s;
+  }
+
+  #logout-btn:hover { background: rgba(255,255,255,.22); }
+
+  main { flex: 1; padding: 24px; max-width: 1400px; width: 100%; margin: 0 auto; }
+
+  /* ── STATS ──────────────────────────────────────────────────────────────────── */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  .stat-card {
+    background: var(--white);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+    box-shadow: var(--shadow);
+    border-left: 4px solid var(--gold);
+  }
+
+  .stat-card.bride  { border-left-color: var(--bride-fg); }
+  .stat-card.groom  { border-left-color: var(--groom-fg); }
+  .stat-card.matched { border-left-color: #2e7d32; }
+
+  .stat-label { font-size: .75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+  .stat-value { font-size: 2rem; font-weight: 700; color: var(--charcoal); line-height: 1.2; }
+
+  /* ── TOOLBAR ─────────────────────────────────────────────────────────────────── */
+  .toolbar {
+    background: var(--white);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    box-shadow: var(--shadow);
+    margin-bottom: 16px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .toolbar input[type="text"] {
+    flex: 1;
+    min-width: 200px;
+    padding: 9px 14px;
+    border: 1.5px solid var(--cream-d);
+    border-radius: var(--radius);
+    font-size: .9rem;
+    background: var(--cream);
+    color: var(--charcoal);
+  }
+
+  .toolbar input:focus { outline: none; border-color: var(--saffron); }
+
+  .toolbar select {
+    padding: 9px 12px;
+    border: 1.5px solid var(--cream-d);
+    border-radius: var(--radius);
+    font-size: .875rem;
+    background: var(--cream);
+    color: var(--charcoal);
+    cursor: pointer;
+  }
+
+  .toolbar select:focus { outline: none; border-color: var(--saffron); }
+
+  .btn {
+    padding: 9px 18px;
+    border-radius: var(--radius);
+    font-size: .875rem;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    transition: opacity .15s, transform .1s;
+  }
+
+  .btn:active { transform: scale(.97); }
+  .btn-primary { background: var(--maroon); color: var(--white); }
+  .btn-primary:hover { opacity: .88; }
+  .btn-outline { background: transparent; border: 1.5px solid var(--cream-d); color: var(--mid); }
+  .btn-outline:hover { border-color: var(--muted); }
+  .btn-ghost { background: transparent; color: var(--muted); border: none; font-size: .8rem; }
+  .btn-ghost:hover { color: var(--charcoal); }
+
+  /* ── TABLE ──────────────────────────────────────────────────────────────────── */
+  .table-wrap {
+    background: var(--white);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow-x: auto;
+  }
+
+  table { width: 100%; border-collapse: collapse; }
+
+  thead th {
+    background: var(--maroon);
+    color: var(--white);
+    padding: 12px 14px;
+    text-align: left;
+    font-size: .78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    white-space: nowrap;
+  }
+
+  tbody tr { border-bottom: 1px solid var(--cream-d); transition: background .1s; }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: var(--cream); }
+  .withdrawn-row { opacity: .5; }
+
+  td {
+    padding: 11px 14px;
+    font-size: .875rem;
+    color: var(--charcoal);
+    vertical-align: middle;
+  }
+
+  .name-cell { font-weight: 600; }
+  .empty-row { text-align: center; padding: 40px; color: var(--muted); }
+  .actions-cell { white-space: nowrap; }
+
+  /* ── BADGES & PILLS ──────────────────────────────────────────────────────────── */
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: .75rem;
+    font-weight: 700;
+    letter-spacing: .03em;
+  }
+
+  .badge-bride  { background: var(--bride-bg);  color: var(--bride-fg); }
+  .badge-groom  { background: var(--groom-bg);  color: var(--groom-fg); }
+  .badge-lg     { font-size: .9rem; padding: 5px 14px; }
+
+  .status-pill {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 12px;
+    font-size: .73rem;
+    font-weight: 600;
+    text-transform: capitalize;
+  }
+
+  .status-active    { background: #e8f5e9; color: #2e7d32; }
+  .status-matched   { background: #e3f2fd; color: #0d47a1; }
+  .status-withdrawn { background: #fce4ec; color: #880e4f; }
+  .status-pending   { background: #fff8e1; color: #e65100; }
+
+  /* ── ICON BUTTONS ────────────────────────────────────────────────────────────── */
+  .btn-icon {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 4px 6px;
+    border-radius: 6px;
+    transition: background .1s;
+  }
+
+  .btn-icon:hover { background: var(--cream-d); }
+  .btn-danger:hover { background: #fce4ec; }
+
+  /* ── LOADING ─────────────────────────────────────────────────────────────────── */
+  #loading {
+    position: fixed;
+    inset: 0;
+    background: rgba(251,244,230,.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 999;
+    font-size: 1.1rem;
+    color: var(--maroon);
+    font-weight: 600;
+    gap: 12px;
+  }
+
+  .spinner {
+    width: 24px;
+    height: 24px;
+    border: 3px solid var(--cream-d);
+    border-top-color: var(--maroon);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── MODAL ───────────────────────────────────────────────────────────────────── */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(42,33,24,.55);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    z-index: 500;
+    padding: 24px;
+    overflow-y: auto;
+  }
+
+  .modal {
+    background: var(--white);
+    border-radius: 12px;
+    width: 100%;
+    max-width: 760px;
+    box-shadow: var(--shadow-md);
+    margin: auto;
+  }
+
+  .modal-header {
+    background: var(--maroon);
+    color: var(--white);
+    padding: 18px 24px;
+    border-radius: 12px 12px 0 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .modal-header h2 { font-size: 1.1rem; font-weight: 700; }
+
+  .modal-body { padding: 24px; }
+  .modal-footer {
+    padding: 16px 24px;
+    border-top: 1px solid var(--cream-d);
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+  }
+
+  /* ── FORM ────────────────────────────────────────────────────────────────────── */
+  .form-section-title {
+    font-size: .7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--saffron);
+    margin: 20px 0 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--cream-d);
+  }
+
+  .form-section-title:first-child { margin-top: 0; }
+
+  .form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .form-grid.thirds { grid-template-columns: 1fr 1fr 1fr; }
+  .form-grid .full  { grid-column: 1 / -1; }
+
+  label {
+    display: block;
+    font-size: .78rem;
+    font-weight: 600;
+    color: var(--mid);
+    margin-bottom: 4px;
+  }
+
+  .form-grid input,
+  .form-grid select,
+  .form-grid textarea {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1.5px solid var(--cream-d);
+    border-radius: var(--radius);
+    font-size: .875rem;
+    background: var(--cream);
+    color: var(--charcoal);
+    font-family: inherit;
+  }
+
+  .form-grid input:focus,
+  .form-grid select:focus,
+  .form-grid textarea:focus {
+    outline: none;
+    border-color: var(--saffron);
+    background: var(--white);
+  }
+
+  .form-grid textarea { resize: vertical; min-height: 80px; }
+
+  .checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-top: 24px;
+  }
+
+  .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--saffron); }
+  .checkbox-row label { margin: 0; font-weight: 500; }
+
+  /* ── VIEW MODAL ──────────────────────────────────────────────────────────────── */
+  .view-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+
+  .view-header h2 { font-size: 1.3rem; color: var(--maroon); flex: 1; }
+
+  .view-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .view-section {
+    background: var(--cream);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+
+  .view-section h3 {
+    font-size: .75rem;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--saffron);
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+
+  .detail-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+  .detail-table th { color: var(--muted); font-weight: 500; text-align: left; padding: 3px 0; width: 45%; }
+  .detail-table td { color: var(--charcoal); padding: 3px 0; font-weight: 500; }
+
+  .view-notes {
+    background: var(--cream);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+
+  .view-notes h3 {
+    font-size: .75rem;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--saffron);
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+
+  .view-notes p { font-size: .875rem; line-height: 1.6; color: var(--charcoal); white-space: pre-wrap; }
+
+  /* ── RESPONSIVE ──────────────────────────────────────────────────────────────── */
+  @media (max-width: 768px) {
+    .stats-row { grid-template-columns: 1fr 1fr; }
+    .view-grid  { grid-template-columns: 1fr; }
+    .form-grid  { grid-template-columns: 1fr; }
+    .form-grid.thirds { grid-template-columns: 1fr; }
+    main { padding: 16px; }
+    header h1 span { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ─── LOGIN ────────────────────────────────────────────────────────────────── -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="login-emblem">🕉️</div>
+    <h1>GB SRSB Vivaha Seva</h1>
+    <p>Admin Portal · Sign in to continue</p>
+    <input type="email"    id="login-email" placeholder="Admin email" autocomplete="username" />
+    <input type="password" id="login-pass"  placeholder="Password"    autocomplete="current-password" />
+    <button id="login-btn">Sign In</button>
+    <p class="error-text" id="login-error"></p>
+  </div>
+</div>
+
+<!-- ─── APP ──────────────────────────────────────────────────────────────────── -->
+<div id="app-screen" class="hidden">
+
+  <header>
+    <div class="header-left">
+      <span class="header-logo">🕉️</span>
+      <h1>Vivaha Seva <span>GB SRS Brundavan · Admin Portal</span></h1>
+    </div>
+    <div class="header-right">
+      <span id="user-email"></span>
+      <button id="logout-btn">Sign Out</button>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- Stats -->
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-label">Total Profiles</div>
+        <div class="stat-value" id="stat-total">—</div>
+      </div>
+      <div class="stat-card bride">
+        <div class="stat-label">Brides</div>
+        <div class="stat-value" id="stat-brides">—</div>
+      </div>
+      <div class="stat-card groom">
+        <div class="stat-label">Grooms</div>
+        <div class="stat-value" id="stat-grooms">—</div>
+      </div>
+      <div class="stat-card matched">
+        <div class="stat-label">Matched</div>
+        <div class="stat-value" id="stat-matched">—</div>
+      </div>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <input type="text" id="search-input" placeholder="Search by name, gotra, profession…" />
+      <select id="filter-gender">
+        <option value="">All</option>
+        <option value="Bride">Bride</option>
+        <option value="Groom">Groom</option>
+      </select>
+      <select id="filter-age">
+        <option value="">Any Age</option>
+        <option value="Between 20 - 30 years">20–30</option>
+        <option value="Between 30 - 40 years">30–40</option>
+        <option value="Above 40 years">40+</option>
+      </select>
+      <input type="text" id="filter-community" placeholder="Community…" style="max-width:160px;min-width:0;" />
+      <select id="filter-status">
+        <option value="">All Status</option>
+        <option value="active">Active</option>
+        <option value="matched">Matched</option>
+        <option value="withdrawn">Withdrawn</option>
+        <option value="pending">Pending</option>
+      </select>
+      <button class="btn btn-ghost" id="clear-filters">Clear</button>
+      <button class="btn btn-outline" id="refresh-btn">↻ Refresh</button>
+      <button class="btn btn-outline" id="export-btn">⬇ Export CSV</button>
+      <button class="btn btn-primary" id="add-profile-btn">+ Add Profile</button>
+    </div>
+
+    <!-- Table -->
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Name</th>
+            <th>Age Group</th>
+            <th>Community</th>
+            <th>Gotra</th>
+            <th>Location</th>
+            <th>Profession</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="profile-tbody">
+          <tr><td colspan="9" class="empty-row">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+  </main>
+</div>
+
+<!-- ─── LOADING ───────────────────────────────────────────────────────────────── -->
+<div id="loading" class="hidden">
+  <div class="spinner"></div> Loading profiles…
+</div>
+
+<!-- ─── ADD/EDIT MODAL ────────────────────────────────────────────────────────── -->
+<div id="form-modal" class="modal-backdrop hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="form-title">Add New Profile</h2>
+    </div>
+    <form id="profile-form">
+      <div class="modal-body">
+
+        <div class="form-section-title">Identity</div>
+        <div class="form-grid thirds">
+          <div>
+            <label>Gender *</label>
+            <select id="f-gender" required>
+              <option value="">Select…</option>
+              <option value="Bride">Bride</option>
+              <option value="Groom">Groom</option>
+            </select>
+          </div>
+          <div>
+            <label>Title</label>
+            <select id="f-title">
+              <option value="">—</option>
+              <option>Mr</option><option>Mrs</option><option>Ms</option>
+              <option>Miss</option><option>Dr</option><option>Prof</option>
+              <option>Shri</option><option>Smt</option><option>Kum</option>
+            </select>
+          </div>
+          <div>
+            <label>Status</label>
+            <select id="f-status">
+              <option value="active">Active</option>
+              <option value="pending">Pending</option>
+              <option value="matched">Matched</option>
+              <option value="withdrawn">Withdrawn</option>
+            </select>
+          </div>
+          <div>
+            <label>First Name *</label>
+            <input id="f-firstName" type="text" required />
+          </div>
+          <div>
+            <label>Last Name *</label>
+            <input id="f-lastName" type="text" required />
+          </div>
+          <div>
+            <label>Date of Birth</label>
+            <input id="f-dob" type="date" />
+          </div>
+        </div>
+
+        <div class="form-section-title">Contact</div>
+        <div class="form-grid">
+          <div>
+            <label>Email</label>
+            <input id="f-email" type="email" />
+          </div>
+          <div>
+            <label>WhatsApp Number</label>
+            <input id="f-whatsapp" type="tel" />
+          </div>
+          <div>
+            <label>Registered Event</label>
+            <input id="f-registeredEvent" type="text" placeholder="e.g. Matrimonial Meet May 2026" />
+          </div>
+        </div>
+
+        <div class="form-section-title">Community & Astrology</div>
+        <div class="form-grid thirds">
+          <div>
+            <label>Community / Caste</label>
+            <input id="f-community" type="text" placeholder="e.g. Madhwa Brahmin" />
+          </div>
+          <div>
+            <label>Sub-sect / Mutt</label>
+            <input id="f-subSect" type="text" placeholder="e.g. Uttaradi Mutt" />
+          </div>
+          <div>
+            <label>Mutt (if separate)</label>
+            <input id="f-mutt" type="text" placeholder="e.g. Rayar Mutt" />
+          </div>
+          <div>
+            <label>Gotra</label>
+            <input id="f-gotra" type="text" />
+          </div>
+          <div>
+            <label>Nakshatra</label>
+            <input id="f-nakshatra" type="text" />
+          </div>
+          <div>
+            <label>Rashi</label>
+            <input id="f-rashi" type="text" />
+          </div>
+        </div>
+
+        <div class="form-section-title">Personal</div>
+        <div class="form-grid thirds">
+          <div>
+            <label>Age Group</label>
+            <select id="f-ageGroup">
+              <option value="">—</option>
+              <option value="Between 20 - 30 years">20–30 years</option>
+              <option value="Between 30 - 40 years">30–40 years</option>
+              <option value="Above 40 years">Above 40</option>
+            </select>
+          </div>
+          <div>
+            <label>Height</label>
+            <input id="f-height" type="text" placeholder="e.g. 5ft 6in" />
+          </div>
+          <div>
+            <label>Dietary Preference</label>
+            <select id="f-dietary">
+              <option value="">—</option>
+              <option>Vegetarian</option>
+              <option>Vegan</option>
+              <option>Non-Vegetarian</option>
+            </select>
+          </div>
+          <div>
+            <label>Marital Status</label>
+            <select id="f-maritalStatus">
+              <option value="">—</option>
+              <option>Never Married</option>
+              <option>Divorced</option>
+              <option>Widowed</option>
+            </select>
+          </div>
+          <div class="checkbox-row">
+            <input type="checkbox" id="f-horoscopeRequired" />
+            <label for="f-horoscopeRequired">Horoscope matching required</label>
+          </div>
+        </div>
+
+        <div class="form-section-title">Location</div>
+        <div class="form-grid thirds">
+          <div>
+            <label>Country</label>
+            <input id="f-country" type="text" placeholder="e.g. United Kingdom" />
+          </div>
+          <div>
+            <label>City</label>
+            <input id="f-city" type="text" placeholder="e.g. London" />
+          </div>
+          <div>
+            <label>Visa / Citizenship Status</label>
+            <select id="f-visaStatus">
+              <option value="">—</option>
+              <option>UK Citizen</option>
+              <option>ILR</option>
+              <option>Work Permit</option>
+              <option>Student Visa</option>
+              <option>India-based</option>
+              <option>Other</option>
+            </select>
+          </div>
+          <div>
+            <label>Willing to Relocate</label>
+            <select id="f-willingToRelocate">
+              <option value="">—</option>
+              <option>Yes</option>
+              <option>UK Only</option>
+              <option>No</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-section-title">Education & Profession</div>
+        <div class="form-grid thirds">
+          <div>
+            <label>Highest Qualification</label>
+            <select id="f-education">
+              <option value="">—</option>
+              <option>PhD / Doctorate</option>
+              <option>Masters (PG)</option>
+              <option>Bachelors (UG)</option>
+              <option>Diploma</option>
+              <option>Other</option>
+            </select>
+          </div>
+          <div>
+            <label>Profession / Field</label>
+            <input id="f-profession" type="text" placeholder="e.g. Doctor, IT Engineer…" />
+          </div>
+          <div>
+            <label>Employer Type</label>
+            <select id="f-employerType">
+              <option value="">—</option>
+              <option>NHS / Public Sector</option>
+              <option>Private Sector</option>
+              <option>Self-Employed</option>
+              <option>Student</option>
+              <option>Other</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-section-title">Partner Preferences</div>
+        <div class="form-grid thirds">
+          <div>
+            <label>Preferred Age Min</label>
+            <input id="f-preferredAgeMin" type="number" min="18" max="80" placeholder="e.g. 25" />
+          </div>
+          <div>
+            <label>Preferred Age Max</label>
+            <input id="f-preferredAgeMax" type="number" min="18" max="80" placeholder="e.g. 35" />
+          </div>
+          <div>
+            <label>Community Preference</label>
+            <input id="f-preferredCommunity" type="text" placeholder="e.g. Brahmin, Any" />
+          </div>
+          <div class="full">
+            <label>Location Preference</label>
+            <input id="f-preferredLocation" type="text" placeholder="e.g. UK-based, open to India" />
+          </div>
+        </div>
+
+        <div class="form-section-title">Additional Details / Notes</div>
+        <div class="form-grid">
+          <div class="full">
+            <textarea id="f-notes" rows="5" placeholder="Any additional details shared by the family, coordinator notes, or free-text from the original registration…"></textarea>
+          </div>
+        </div>
+
+        <p class="error-text" id="form-error"></p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline" id="form-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="form-save">Save Profile</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ─── VIEW MODAL ────────────────────────────────────────────────────────────── -->
+<div id="view-modal" class="modal-backdrop hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Profile Details</h2>
+      <button id="view-close" class="btn-icon" style="color:white;font-size:1.2rem;">✕</button>
+    </div>
+    <div class="modal-body" id="view-content"></div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" id="view-close-footer" onclick="document.getElementById('view-modal').classList.add('hidden')">Close</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
