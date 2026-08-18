@@ -28,9 +28,12 @@
   const db   = getFirestore(app);
 
   // ── STATE ─────────────────────────────────────────────────────────────────────
-  let allProfiles  = [];
-  let editingId    = null;
-  let importRows   = [];  // parsed spreadsheet rows awaiting review
+  let allProfiles    = [];
+  let filteredCache  = [];  // current filtered set for pagination
+  let editingId      = null;
+  let importRows     = [];  // parsed spreadsheet rows awaiting review
+  let currentPage    = 1;
+  let pageSize       = 25;
 
   // ── DOM ───────────────────────────────────────────────────────────────────────
   const $    = id => document.getElementById(id);
@@ -86,7 +89,8 @@
     showLoading(true);
     try {
       const snap = await getDocs(query(collection(db, 'profiles'), orderBy('createdAt', 'desc')));
-      allProfiles = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      allProfiles   = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      filteredCache = allProfiles;
       updateStats();
       renderTable(allProfiles);
     } catch(e) { console.error(e); }
@@ -107,13 +111,22 @@
   }
 
   // ── TABLE ─────────────────────────────────────────────────────────────────────
-  function renderTable(profiles) {
+  function renderTable(profiles, resetPage = true) {
+    filteredCache = profiles;
+    if (resetPage) currentPage = 1;
+
     const tbody = $('profile-tbody');
     if (!profiles.length) {
       tbody.innerHTML = `<tr><td colspan="10" class="empty-row">No profiles found.</td></tr>`;
+      renderPagination(0);
       return;
     }
-    tbody.innerHTML = profiles.map(p => `
+
+    const start = (currentPage - 1) * pageSize;
+    const end   = pageSize === 0 ? profiles.length : start + pageSize;
+    const page  = pageSize === 0 ? profiles : profiles.slice(start, end);
+
+    tbody.innerHTML = page.map(p => `
       <tr class="profile-row ${p.status==='withdrawn'?'withdrawn-row':''}">
         <td><span class="badge badge-${p.gender==='Bride'?'bride':'groom'}">${p.gender}</span></td>
         <td class="name-cell">
@@ -134,23 +147,73 @@
           <button class="btn-icon btn-danger" onclick="window.withdrawProfile('${p.id}')" title="Withdraw">🗑</button>
         </td>
       </tr>`).join('');
+
+    renderPagination(profiles.length);
   }
+
+  function renderPagination(total) {
+    const wrap = $('pagination-wrap');
+    if (!wrap) return;
+    if (!total || pageSize === 0) { wrap.innerHTML = `<span class="page-info">Showing all ${total} profiles</span>`; return; }
+
+    const totalPages = Math.ceil(total / pageSize);
+    const start = Math.min((currentPage - 1) * pageSize + 1, total);
+    const end   = Math.min(currentPage * pageSize, total);
+
+    let pages = '';
+    for (let i = 1; i <= totalPages; i++) {
+      if (i === 1 || i === totalPages || (i >= currentPage - 1 && i <= currentPage + 1)) {
+        pages += `<button class="page-btn ${i === currentPage ? 'active' : ''}" onclick="window.goToPage(${i})">${i}</button>`;
+      } else if (i === currentPage - 2 || i === currentPage + 2) {
+        pages += `<span class="page-ellipsis">…</span>`;
+      }
+    }
+
+    wrap.innerHTML = `
+      <span class="page-info">Showing ${start}–${end} of ${total}</span>
+      <div class="page-buttons">
+        <button class="page-btn" onclick="window.goToPage(${currentPage-1})" ${currentPage===1?'disabled':''}>‹ Prev</button>
+        ${pages}
+        <button class="page-btn" onclick="window.goToPage(${currentPage+1})" ${currentPage===totalPages?'disabled':''}>Next ›</button>
+      </div>`;
+  }
+
+  window.goToPage = (page) => {
+    const totalPages = Math.ceil(filteredCache.length / pageSize);
+    if (page < 1 || page > totalPages) return;
+    currentPage = page;
+    renderTable(filteredCache, false);
+    $('profile-tbody').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
 
   // ── FILTERS ───────────────────────────────────────────────────────────────────
   function applyFilters() {
-    const q        = $('search-input').value.toLowerCase();
+    const q        = $('search-input').value.toLowerCase().trim();
     const gender   = $('filter-gender').value;
     const age      = $('filter-age').value;
     const status   = $('filter-status').value;
     const review   = $('filter-review').checked;
+    const community = $('filter-community') ? $('filter-community').value.toLowerCase().trim() : '';
+
     const filtered = allProfiles.filter(p => {
-      const name = `${p.candidateFirstName||p.firstName} ${p.candidateLastName||p.lastName}`;
-      const text = `${name} ${p.community} ${p.gotra} ${p.city} ${p.profession} ${p.languages} ${p.notes}`.toLowerCase();
-      return (!q || text.includes(q))
-        && (!gender || p.gender === gender)
-        && (!age    || p.ageGroup === age)
-        && (!status || (p.status||'active') === status)
-        && (!review || p.needsReview);
+      // Search only across meaningful text fields — NOT ageGroup, gender, status
+      const name = `${p.candidateFirstName||p.firstName||''} ${p.candidateLastName||p.lastName||''}`.trim();
+      const searchable = [
+        name,
+        p.community, p.gotra, p.nakshatra, p.city, p.country,
+        p.profession, p.languages, p.motherTongue, p.nativePlace,
+        p.education, p.educationField, p.aboutMe, p.registeredEvent,
+        p.email, p.whatsapp, p.coordinatorNotes, p.needsReviewReason
+      ].map(v => (v||'').toLowerCase()).join(' ');
+
+      const matchSearch    = !q        || searchable.includes(q);
+      const matchGender    = !gender   || p.gender === gender;
+      const matchAge       = !age      || (p.ageGroup||'') === age;
+      const matchStatus    = !status   || (p.status||'active') === status;
+      const matchReview    = !review   || !!p.needsReview;
+      const matchCommunity = !community|| (p.community||'').toLowerCase().includes(community);
+
+      return matchSearch && matchGender && matchAge && matchStatus && matchReview && matchCommunity;
     });
     renderTable(filtered);
   }
@@ -163,9 +226,17 @@
     $('search-input').value = '';
     ['filter-gender','filter-age','filter-status'].forEach(id => $(id).selectedIndex = 0);
     $('filter-review').checked = false;
+    const fc = $('filter-community');
+    if (fc) fc.value = '';
     renderTable(allProfiles);
   });
   $('refresh-btn').addEventListener('click', loadProfiles);
+
+  $('page-size-select').addEventListener('change', e => {
+    pageSize = parseInt(e.target.value);
+    currentPage = 1;
+    renderTable(filteredCache, true);
+  });
 
   // ── FORM FIELDS LIST ──────────────────────────────────────────────────────────
   const FIELDS = [
@@ -664,6 +735,16 @@
   .import-card-details { font-size:.82rem; color:var(--mid); }
   .import-card-note { font-size:.78rem; color:var(--muted); margin-top:6px; font-style:italic; background:var(--cream); padding:6px 10px; border-radius:4px; }
 
+  /* PAGINATION */
+  .pagination-bar { display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-top:1px solid var(--cream-d); flex-wrap:wrap; gap:8px; }
+  .page-info { font-size:.82rem; color:var(--muted); }
+  .page-buttons { display:flex; gap:4px; align-items:center; flex-wrap:wrap; }
+  .page-btn { padding:5px 10px; border:1.5px solid var(--cream-d); border-radius:6px; background:#fff; color:var(--mid); font-size:.82rem; cursor:pointer; transition:all .15s; min-width:36px; }
+  .page-btn:hover:not(:disabled) { border-color:var(--saffron); color:var(--saffron); }
+  .page-btn.active { background:var(--maroon); color:#fff; border-color:var(--maroon); font-weight:700; }
+  .page-btn:disabled { opacity:.4; cursor:not-allowed; }
+  .page-ellipsis { color:var(--muted); padding:0 4px; font-size:.85rem; }
+
   @media (max-width:768px) {
     .stats-row { grid-template-columns:1fr 1fr; }
     .stat-card.review { grid-column: 1 / -1; }
@@ -736,6 +817,12 @@
           <option value="pending">Pending</option>
         </select>
         <label class="review-filter"><input type="checkbox" id="filter-review" /> <span id="review-filter-label">⚠ Needs review</span></label>
+        <select id="page-size-select" title="Rows per page">
+          <option value="25">25 per page</option>
+          <option value="50">50 per page</option>
+          <option value="100">100 per page</option>
+          <option value="0">Show all</option>
+        </select>
         <button class="btn btn-ghost" id="clear-filters">Clear</button>
         <button class="btn btn-outline" id="refresh-btn">↻ Refresh</button>
         <button class="btn btn-outline" id="export-btn">⬇ Export CSV</button>
@@ -755,6 +842,7 @@
             <tr><td colspan="10" class="empty-row">Loading…</td></tr>
           </tbody>
         </table>
+        <div id="pagination-wrap" class="pagination-bar"></div>
       </div>
     </div>
 
